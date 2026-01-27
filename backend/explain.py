@@ -8,7 +8,7 @@ NO external LLMs or APIs are used - explanations are fully deterministic.
 """
 
 import re
-from typing import Dict, List
+from typing import Dict, List, Any
 
 
 class ExplanationGenerator:
@@ -104,7 +104,7 @@ class ExplanationGenerator:
             return list(dict.fromkeys(matches))
         return []
     
-    def _analyze_text_features(self, text: str) -> Dict[str, any]:
+    def _analyze_text_features(self, text: str) -> Dict[str, Any]:
         """Analyze linguistic features of the text."""
         features = {
             'length': len(text.split()),
@@ -151,7 +151,7 @@ class ExplanationGenerator:
         conjunction_count = sum(1 for conj in self.CONJUNCTIONS if conj in text.lower())
         return comma_count + conjunction_count + 1
     
-    def _analyze_text_complexity(self, text: str) -> Dict[str, any]:
+    def _analyze_text_complexity(self, text: str) -> Dict[str, Any]:
         """
         Analyze text for complexity indicators.
         
@@ -186,7 +186,7 @@ class ExplanationGenerator:
     def _add_complexity_warning(
         self,
         base_explanation: str,
-        complexity_info: Dict[str, any]
+        complexity_info: Dict[str, Any]
     ) -> str:
         """Add warning/disclaimer for complex emotional text."""
         if not complexity_info['is_complex']:
@@ -223,7 +223,7 @@ class ExplanationGenerator:
         text: str,
         emotion: str,
         confidence: float,
-        complexity_info: Dict[str, any] = None
+        complexity_info: Dict[str, Any] = None
     ) -> str:
         """Generate explanation based on keyword presence."""
         keywords = self._find_keywords(text, emotion)
@@ -356,3 +356,113 @@ class ExplanationGenerator:
         )
         
         return final_explanation
+    
+    def generate_clause_level_explanation(
+        self,
+        text: str,
+        clause_emotions: List[Dict[str, Any]],
+        shift_analysis: Dict[str, Any],
+        primary_emotion: str,
+        emotion_type: str
+    ) -> str:
+        """
+        Generate explanation for clause-level emotion analysis.
+        Handles single, mixed, and ambiguous emotion types.
+        
+        Args:
+            text: Original full text
+            clause_emotions: List of emotion predictions for each clause
+            shift_analysis: Analysis of emotion shifts
+            primary_emotion: The primary/dominant emotion
+            emotion_type: 'single', 'mixed', or 'ambiguous'
+            
+        Returns:
+            Human-readable explanation
+        """
+        # Check for anticipatory clauses
+        anticipatory_count = sum(
+            1 for c in clause_emotions 
+            if 'anticipatory' in str(c).lower() or 
+               any(word in c.get('text', '').lower() for word in ['thought', 'expected', 'hoped'])
+        )
+        
+        # Handle ambiguous emotions
+        if emotion_type == 'ambiguous':
+            explanation_parts = [
+                f"The text expresses {primary_emotion}, but with low confidence across all clauses. "
+                "The emotional state is ambiguous or subtle."
+            ]
+            
+            if anticipatory_count > 0:
+                explanation_parts.append(
+                    f"{anticipatory_count} clause(s) express anticipated emotions rather than current feelings."
+                )
+            
+            return " ".join(explanation_parts)
+        
+        # Handle single emotion
+        if not shift_analysis['has_shift']:
+            base = f"The text consistently expresses {primary_emotion} across all parts."
+            
+            if anticipatory_count > 0:
+                return f"{base} Note: {anticipatory_count} clause(s) express anticipated emotions, reducing confidence."
+            
+            return base
+        
+        # Handle mixed emotions
+        explanation_parts = []
+        
+        # Opening statement
+        if shift_analysis['type'] == 'opposing':
+            explanation_parts.append(
+                f"The text contains opposing emotions. "
+                f"The primary emotion is {primary_emotion}."
+            )
+        else:
+            explanation_parts.append(
+                f"The text expresses mixed emotions. "
+                f"The dominant emotion is {primary_emotion}."
+            )
+        
+        # Describe each clause
+        clause_descriptions = []
+        for i, clause_info in enumerate(clause_emotions, 1):
+            clause_text = clause_info['text']
+            emotion = clause_info['emotion']
+            confidence = clause_info['confidence']
+            
+            # Check if anticipatory
+            is_anticipatory = any(word in clause_text.lower() for word in ['thought', 'expected', 'hoped', 'would make me'])
+            
+            # Find keywords in this clause
+            keywords = self._find_keywords(clause_text, emotion)
+            
+            prefix = "anticipated" if is_anticipatory else "experienced"
+            
+            if keywords:
+                keyword_str = "', '".join(keywords[:2])
+                clause_descriptions.append(
+                    f"Clause {i} ('{clause_text[:40]}...') expresses {prefix} {emotion} "
+                    f"(words: '{keyword_str}')"
+                )
+            else:
+                clause_descriptions.append(
+                    f"Clause {i} ('{clause_text[:40]}...') expresses {prefix} {emotion}"
+                )
+        
+        # Add clause breakdowns
+        explanation_parts.append(" ".join(clause_descriptions))
+        
+        # Add insight about emotion complexity
+        unique_emotions = shift_analysis['unique_emotions']
+        if len(unique_emotions) >= 3:
+            explanation_parts.append(
+                f"This demonstrates emotional complexity with {len(unique_emotions)} distinct emotions."
+            )
+        
+        if anticipatory_count > 0:
+            explanation_parts.append(
+                f"Note: {anticipatory_count} clause(s) express anticipated rather than current emotions."
+            )
+        
+        return " ".join(explanation_parts)

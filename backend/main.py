@@ -12,10 +12,12 @@ from fastapi.responses import JSONResponse
 import logging
 from contextlib import asynccontextmanager
 
-from backend.schemas import TextInput, EmotionPrediction, HealthCheck
+from backend.schemas import TextInput, EmotionPrediction, HealthCheck, ClauseEmotion
 from backend.tokenizer import EmotionTokenizer
 from backend.model import EmotionClassifier
 from backend.explain import ExplanationGenerator
+from backend.clause_analyzer import ClauseAnalyzer
+from backend.reasoning_assistant import EmotionReasoningAssistant
 
 # Configure logging
 logging.basicConfig(
@@ -28,6 +30,8 @@ logger = logging.getLogger(__name__)
 tokenizer = None
 model = None
 explainer = None
+clause_analyzer = None
+reasoning_assistant = None
 
 
 @asynccontextmanager
@@ -37,23 +41,23 @@ async def lifespan(app: FastAPI):
     Loads models on startup and cleans up on shutdown.
     """
     # Startup: Load models
-    global tokenizer, model, explainer
+    global tokenizer, model, explainer, clause_analyzer, reasoning_assistant
     
     logger.info("=" * 60)
     logger.info("Starting Explainable Emotion Classification API")
     logger.info("=" * 60)
     
     try:
-        logger.info("Loading emotion-specific tokenizer...")
+        logger.info("Loading RoBERTa tokenizer for GoEmotions...")
         tokenizer = EmotionTokenizer(
-            model_name="bhadresh-savani/distilbert-base-uncased-emotion",
+            model_name="SamLowe/roberta-base-go_emotions",
             max_length=128
         )
         logger.info(f"✓ Tokenizer loaded successfully")
         
-        logger.info("Loading pre-trained emotion model...")
+        logger.info("Loading RoBERTa GoEmotions model...")
         model = EmotionClassifier(
-            model_name="bhadresh-savani/distilbert-base-uncased-emotion",
+            model_name="SamLowe/roberta-base-go_emotions",
             device=None  # Auto-detect device
         )
         logger.info(f"✓ Model loaded successfully")
@@ -61,6 +65,14 @@ async def lifespan(app: FastAPI):
         logger.info("Initializing explanation generator...")
         explainer = ExplanationGenerator()
         logger.info(f"✓ Explainer initialized successfully")
+        
+        logger.info("Initializing clause analyzer...")
+        clause_analyzer = ClauseAnalyzer()
+        logger.info(f"✓ Clause analyzer initialized successfully")
+        
+        logger.info("Initializing reasoning assistant...")
+        reasoning_assistant = EmotionReasoningAssistant()
+        logger.info(f"✓ Reasoning assistant initialized successfully")
         
         logger.info("=" * 60)
         logger.info("API is ready to accept requests!")
@@ -124,7 +136,12 @@ async def health_check():
     Returns:
         Health status and model loading status
     """
-    model_loaded = all([tokenizer is not None, model is not None, explainer is not None])
+    model_loaded = all([
+        tokenizer is not None,
+        model is not None,
+        explainer is not None,
+        clause_analyzer is not None
+    ])
     
     return HealthCheck(
         status="healthy" if model_loaded else "unhealthy",
@@ -177,7 +194,7 @@ async def predict_emotion(input_data: TextInput):
         HTTPException: If models are not loaded or prediction fails
     """
     # Check if models are loaded
-    if any(component is None for component in [tokenizer, model, explainer]):
+    if any(component is None for component in [tokenizer, model, explainer, clause_analyzer]):
         logger.error("Prediction request received but models not loaded")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -189,47 +206,164 @@ async def predict_emotion(input_data: TextInput):
         text = input_data.text
         logger.info(f"Received prediction request for text: '{text[:50]}...'")
         
-        # Step 2: Tokenize text
-        logger.debug("Tokenizing input text...")
-        tokenized = tokenizer.tokenize(text)
+        # Step 2: Check if clause-level analysis is needed
+        needs_clause_analysis = clause_analyzer.should_analyze_clauses(text)
+        logger.debug(f"Clause analysis needed: {needs_clause_analysis}")
         
-        input_ids = tokenized['input_ids']
-        attention_mask = tokenized['attention_mask']
-        tokens = tokenized['tokens']
-        
-        logger.debug(f"Tokenization complete. Tokens: {tokens[:10]}...")
-        
-        # Step 3: Run model inference
-        logger.debug("Running BERT inference...")
-        prediction = model.predict(input_ids, attention_mask)
-        
-        emotion = prediction['emotion']
-        confidence = prediction['confidence']
-        all_probabilities = prediction['all_probabilities']
-        
-        logger.info(f"Prediction: {emotion} (confidence: {confidence:.4f})")
-        logger.debug(f"All probabilities: {all_probabilities}")
-        
-        # Step 4: Generate explanation
-        logger.debug("Generating explanation...")
-        explanation = explainer.generate_explanation(
-            text=text,
-            emotion=emotion,
-            confidence=confidence,
-            all_probabilities=all_probabilities
-        )
-        
-        logger.info(f"Explanation: {explanation[:100]}...")
-        
-        # Step 5: Create response
-        response = EmotionPrediction(
-            emotion=emotion,
-            confidence=confidence,
-            explanation=explanation
-        )
-        
-        logger.info("Prediction completed successfully")
-        return response
+        if needs_clause_analysis:
+            # === CLAUSE-LEVEL ANALYSIS PATH ===
+            logger.info("Performing clause-level emotion analysis")
+            
+            # Split into clauses
+            clauses = clause_analyzer.split_into_clauses(text)
+            logger.debug(f"Split into {len(clauses)} clauses: {clauses}")
+            
+            # Analyze each clause
+            clause_emotions = []
+            for clause_text in clauses:
+                # Tokenize clause
+                tokenized = tokenizer.tokenize(clause_text)
+                
+                # Predict emotion for clause
+                prediction = model.predict(tokenized['input_ids'], tokenized['attention_mask'])
+                
+                clause_emotions.append({
+                    'text': clause_text,
+                    'emotion': prediction['emotion'],
+                    'confidence': prediction['confidence'],
+                    'all_probabilities': prediction['all_probabilities']
+                })
+                
+                logger.debug(f"Clause: '{clause_text[:30]}...' → {prediction['emotion']} ({prediction['confidence']:.2f})")
+            
+            # Detect emotion shifts
+            shift_analysis = clause_analyzer.detect_emotion_shift(clause_emotions)
+            
+            # Get primary emotion with emotion_type
+            primary_emotion, avg_confidence, emotion_type = clause_analyzer.get_primary_emotion(clause_emotions)
+            
+            # Get all probabilities (averaged across clauses)
+            all_emotions_avg = {}
+            for emotion_label in model.get_emotion_labels():
+                probs = [c['all_probabilities'].get(emotion_label, 0) for c in clause_emotions]
+                all_emotions_avg[emotion_label] = sum(probs) / len(probs)
+            
+            # Generate explanation for mixed emotions
+            explanation = explainer.generate_clause_level_explanation(
+                text=text,
+                clause_emotions=clause_emotions,
+                shift_analysis=shift_analysis,
+                primary_emotion=primary_emotion,
+                emotion_type=emotion_type
+            )
+            
+            # Step 6: Apply reasoning fixes
+            logger.debug("Applying reasoning fixes...")
+            raw_output = {
+                'emotion': primary_emotion,
+                'confidence': avg_confidence,
+                'all_emotions': all_emotions_avg,
+                'explanation': explanation,
+                'emotion_type': emotion_type,
+                'clauses': [{
+                    'text': c['text'],
+                    'emotion': c['emotion'],
+                    'confidence': c['confidence']
+                } for c in clause_emotions]
+            }
+            
+            fixed_output = reasoning_assistant.apply_reasoning_fixes(text, raw_output)
+            
+            # Create clause emotion objects from fixed output
+            clause_objects = [
+                ClauseEmotion(
+                    text=c['text'],
+                    emotion=c['emotion'],
+                    confidence=c['confidence']
+                )
+                for c in fixed_output['clauses']
+            ]
+            
+            # Create response with fixed reasoning
+            response = EmotionPrediction(
+                emotion=fixed_output['primary_emotion'],
+                confidence=fixed_output['confidence'],
+                all_emotions=all_emotions_avg,
+                explanation=fixed_output['explanation'],
+                emotion_type=fixed_output['emotion_type'],
+                clauses=clause_objects
+            )
+            
+            logger.info(f"Clause-level analysis complete: {fixed_output['emotion_type']} emotions")
+            return response
+            
+        else:
+            # === STANDARD SINGLE-CLAUSE ANALYSIS PATH ===
+            logger.debug("Performing standard single-clause analysis")
+            
+            # Step 3: Tokenize text
+            tokenized = tokenizer.tokenize(text)
+            
+            input_ids = tokenized['input_ids']
+            attention_mask = tokenized['attention_mask']
+            tokens = tokenized['tokens']
+            
+            logger.debug(f"Tokenization complete. Tokens: {tokens[:10]}...")
+            
+            # Step 4: Run model inference
+            logger.debug("Running model inference...")
+            prediction = model.predict(input_ids, attention_mask)
+            
+            emotion = prediction['emotion']
+            confidence = prediction['confidence']
+            all_probabilities = prediction['all_probabilities']
+            
+            logger.info(f"Prediction: {emotion} (confidence: {confidence:.4f})")
+            logger.debug(f"All probabilities: {all_probabilities}")
+            
+            # Step 5: Generate explanation
+            logger.debug("Generating explanation...")
+            explanation = explainer.generate_explanation(
+                text=text,
+                emotion=emotion,
+                confidence=confidence,
+                all_probabilities=all_probabilities
+            )
+            
+            logger.info(f"Explanation: {explanation[:100]}...")
+            
+            # Step 6: Apply reasoning fixes
+            logger.debug("Applying reasoning fixes...")
+            raw_output = {
+                'emotion': emotion,
+                'confidence': confidence,
+                'all_emotions': all_probabilities,
+                'explanation': explanation,
+                'emotion_type': 'single',
+                'clauses': []
+            }
+            
+            fixed_output = reasoning_assistant.apply_reasoning_fixes(text, raw_output)
+            
+            # Create response with fixed reasoning
+            response = EmotionPrediction(
+                emotion=fixed_output['primary_emotion'],
+                confidence=fixed_output['confidence'],
+                all_emotions=all_probabilities,
+                explanation=fixed_output['explanation'],
+                emotion_type=fixed_output['emotion_type'],
+                clauses=None if not fixed_output['clauses'] else [
+                    ClauseEmotion(
+                        text=c['text'],
+                        emotion=c['emotion'],
+                        confidence=c['confidence']
+                    )
+                    for c in fixed_output['clauses']
+                ]
+            )
+            
+            logger.info("Prediction completed successfully")
+            return response
         
     except Exception as e:
         logger.error(f"Error during prediction: {str(e)}", exc_info=True)

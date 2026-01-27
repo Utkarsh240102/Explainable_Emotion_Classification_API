@@ -10,8 +10,8 @@ Handles:
 
 import torch
 import torch.nn.functional as F
-from transformers import DistilBertForSequenceClassification
-from typing import Dict
+from transformers import RobertaForSequenceClassification
+from typing import Dict, Any
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -20,23 +20,25 @@ logger = logging.getLogger(__name__)
 
 class EmotionClassifier:
     """
-    DistilBERT-based emotion classifier.
+    RoBERTa-based emotion classifier using GoEmotions.
     
-    Predicts one of seven emotions:
-    - Anger
-    - Disgust
-    - Fear
-    - Joy
-    - Neutral
-    - Sadness
-    - Surprise
+    Predicts one or multiple emotions from 28 categories:
+    Includes emotions like joy, sadness, anger, fear, surprise, love,
+    gratitude, admiration, confusion, and many more nuanced emotions.
     """
     
-    EMOTION_LABELS = ['anger', 'disgust', 'fear', 'joy', 'neutral', 'sadness', 'surprise']
+    # GoEmotions has 28 emotion labels (27 emotions + neutral)
+    EMOTION_LABELS = [
+        'admiration', 'amusement', 'anger', 'annoyance', 'approval', 'caring',
+        'confusion', 'curiosity', 'desire', 'disappointment', 'disapproval',
+        'disgust', 'embarrassment', 'excitement', 'fear', 'gratitude', 'grief',
+        'joy', 'love', 'nervousness', 'optimism', 'pride', 'realization',
+        'relief', 'remorse', 'sadness', 'surprise', 'neutral'
+    ]
     
     def __init__(
         self,
-        model_name: str = "bhadresh-savani/distilbert-base-uncased-emotion",
+        model_name: str = "SamLowe/roberta-base-go_emotions",
         device: str = None
     ):
         """
@@ -52,11 +54,10 @@ class EmotionClassifier:
         else:
             self.device = torch.device(device)
         
-        logger.info(f"Loading DistilBERT model on device: {self.device}")
+        logger.info(f"Loading RoBERTa GoEmotions model on device: {self.device}")
         
-        # Load DistilBERT model for sequence classification
-        # Don't specify num_labels - use model's trained configuration
-        self.model = DistilBertForSequenceClassification.from_pretrained(model_name)
+        # Load RoBERTa model for sequence classification (GoEmotions)
+        self.model = RobertaForSequenceClassification.from_pretrained(model_name)
         
         # Move model to device
         self.model.to(self.device)
@@ -67,12 +68,7 @@ class EmotionClassifier:
         # Get actual number of labels from model
         self.num_labels = self.model.config.num_labels
         
-        # Update emotion labels to match model's actual labels
-        if self.num_labels == 6:
-            # This model has 6 emotions (no 'neutral')
-            self.EMOTION_LABELS = ['sadness', 'joy', 'love', 'anger', 'fear', 'surprise']
-        
-        logger.info(f"Model loaded successfully with {self.num_labels} emotion classes: {self.EMOTION_LABELS}")
+        logger.info(f"Model loaded successfully with {self.num_labels} emotion classes")
     
     def get_logits(
         self,
@@ -95,7 +91,7 @@ class EmotionClassifier:
         
         # Disable gradient computation (inference mode)
         with torch.no_grad():
-            # Forward pass through BERT
+            # Forward pass through RoBERTa
             outputs = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask
@@ -124,7 +120,7 @@ class EmotionClassifier:
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor
-    ) -> Dict[str, any]:
+    ) -> Dict[str, Any]:
         """
         Complete prediction pipeline.
         

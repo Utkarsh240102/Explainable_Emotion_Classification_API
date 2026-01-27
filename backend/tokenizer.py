@@ -8,7 +8,7 @@ Handles:
 4. Special token handling ([CLS] and [SEP])
 """
 
-from transformers import DistilBertTokenizer
+from transformers import RobertaTokenizer
 from typing import Dict
 import torch
 
@@ -18,15 +18,15 @@ class EmotionTokenizer:
     Handles tokenization for emotion classification using BERT tokenizer.
     """
     
-    def __init__(self, model_name: str = "bhadresh-savani/distilbert-base-uncased-emotion", max_length: int = 128):
+    def __init__(self, model_name: str = "SamLowe/roberta-base-go_emotions", max_length: int = 128):
         """
         Initialize the tokenizer.
         
         Args:
-            model_name: Name of the pretrained BERT model/tokenizer
+            model_name: Name of the pretrained RoBERTa model/tokenizer
             max_length: Maximum sequence length for tokenization
         """
-        self.tokenizer = DistilBertTokenizer.from_pretrained(model_name)
+        self.tokenizer = RobertaTokenizer.from_pretrained(model_name)
         self.max_length = max_length
         
     def preprocess_text(self, text: str) -> str:
