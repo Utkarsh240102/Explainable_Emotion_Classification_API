@@ -171,7 +171,7 @@ class EmotionClassifier:
             'all_probabilities': all_probabilities,
             'logits': logits_cpu.tolist()
         }
-    
+    #function to get emotion labels
     def get_emotion_labels(self) -> list:
         """Return list of all emotion labels."""
         return self.EMOTION_LABELS.copy()
