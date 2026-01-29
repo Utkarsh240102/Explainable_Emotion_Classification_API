@@ -28,6 +28,7 @@ class ClauseEmotion(BaseModel):
     text: str = Field(..., description="The clause text")
     emotion: str = Field(..., description="Predicted emotion for this clause")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence score")
+    all_probabilities: Optional[dict] = Field(None, description="All emotion probabilities for this clause")
 
 
 class EmotionPrediction(BaseModel):
@@ -38,7 +39,8 @@ class EmotionPrediction(BaseModel):
     explanation: str = Field(..., description="Human-readable explanation of the prediction")
     
     # Clause-level analysis (optional, only for complex text)
-    emotion_type: Optional[str] = Field(None, description="Type: 'single', 'mixed', or 'opposing'")
+    emotion_type: Optional[str] = Field(None, description="Type: 'single', 'mixed', 'opposing', or 'ambiguous'")
+    primary_emotions: Optional[List[str]] = Field(None, description="List of primary emotions detected (for mixed/opposing emotions)")
     clauses: Optional[List[ClauseEmotion]] = Field(None, description="Clause-level emotion breakdown")
     
     class Config:

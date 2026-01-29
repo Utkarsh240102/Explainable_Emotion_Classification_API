@@ -68,7 +68,7 @@ class EmotionTokenizer:
         cleaned_text = self.preprocess_text(text)
         
         # Step 2-5: Tokenize with BERT tokenizer
-        encoding = self.tokenizer.encode_plus(
+        encoding = self.tokenizer(
             cleaned_text,
             add_special_tokens=True,          # Add [CLS] and [SEP]
             max_length=self.max_length,       # Maximum sequence length

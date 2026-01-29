@@ -90,15 +90,19 @@ class ClauseAnalyzer:
         
         return False
     
-    def _clean_clauses(self, clauses: List[str]) -> List[str]:
+    def _clean_clauses(self, clauses: List[str], min_words: int = 3) -> List[str]:
         """
         Remove duplicate, fragmentary, or repeated clauses.
         
         Rules:
         1. Remove exact duplicates
         2. Remove clauses that are substrings of longer clauses
-        3. Remove clauses shorter than 4 meaningful words
+        3. Remove clauses shorter than min_words meaningful words
         4. Preserve original order
+        
+        Args:
+            clauses: List of clause strings to clean
+            min_words: Minimum number of meaningful words (default 3)
         """
         if not clauses:
             return []
@@ -115,7 +119,7 @@ class ClauseAnalyzer:
             
             # Count meaningful words (exclude very short words)
             words = [w for w in clause_lower.split() if len(w) > 2]
-            if len(words) < 4:
+            if len(words) < min_words:
                 continue
             
             # Check for exact duplicates
@@ -176,6 +180,21 @@ class ClauseAnalyzer:
         """
         clauses = []
         
+        # Strategy 0: Handle "part of me X and part of me Y" pattern specifically
+        if 'part of me' in text.lower():
+            # Count occurrences of "part of me"
+            count = text.lower().count('part of me')
+            if count >= 2:
+                # Split on "and" to separate the two parts
+                if ' and ' in text.lower():
+                    parts = re.split(r'\s+and\s+', text, flags=re.IGNORECASE)
+                    if len(parts) == 2:
+                        # Both parts should contain "part of me"
+                        clauses = [p.strip() for p in parts if p.strip()]
+                        # Don't clean these - they're intentionally parallel structures
+                        if len(clauses) == 2:
+                            return clauses
+        
         # Strategy 1: Split on contrasting conjunctions
         if self.contrast_pattern.search(text):
             parts = self.contrast_pattern.split(text)
@@ -192,7 +211,12 @@ class ClauseAnalyzer:
             # Add last part if exists
             if len(parts) % 2 == 1 and parts[-1].strip():
                 clauses.append(parts[-1].strip())
-            return self._clean_clauses([c for c in clauses if c])
+            
+            cleaned = self._clean_clauses([c for c in clauses if c])
+            # If cleaning resulted in empty list, return whole text
+            if not cleaned:
+                return [text.strip()]
+            return cleaned
         
         # Strategy 2: Split on split phrases
         if self.split_phrase_pattern.search(text):
@@ -201,11 +225,16 @@ class ClauseAnalyzer:
                 part = part.strip()
                 if part and part.lower() not in [p.lower() for p in self.SPLIT_PHRASES]:
                     # Include the split phrase with the clause
-                    if i > 0 and parts[i-1].lower() in [p.lower() for p in self.SPLIT_PHRASES]:
+                    if i > 0 and i-1 < len(parts) and parts[i-1].lower() in [p.lower() for p in self.SPLIT_PHRASES]:
                         clauses.append(f"{parts[i-1]} {part}")
                     else:
                         clauses.append(part)
-            return self._clean_clauses([c for c in clauses if c])
+            
+            cleaned = self._clean_clauses([c for c in clauses if c])
+            # If cleaning resulted in empty list, return whole text
+            if not cleaned:
+                return [text.strip()]
+            return cleaned
         
         # Strategy 3: Split on commas with coordinating conjunctions
         if ',' in text:
@@ -262,7 +291,7 @@ class ClauseAnalyzer:
     def get_primary_emotion(
         self,
         clause_emotions: List[Dict[str, Any]]
-    ) -> Tuple[str, float, str]:
+    ) -> Tuple[str, float, str, List[str]]:
         """
         Determine the primary emotion from clause-level analysis.
         Implements conservative confidence and handles anticipatory/exhaustion cases.
@@ -271,10 +300,10 @@ class ClauseAnalyzer:
             clause_emotions: List of emotion predictions for each clause
             
         Returns:
-            Tuple of (primary_emotion, confidence, emotion_type)
+            Tuple of (primary_emotion, confidence, emotion_type, primary_emotions)
         """
         if not clause_emotions:
-            return ("neutral", 0.0, "single")
+            return ("neutral", 0.0, "single", [])
         
         # If single clause
         if len(clause_emotions) == 1:
@@ -292,7 +321,7 @@ class ClauseAnalyzer:
                 emotion = 'disappointment'
                 confidence *= 0.8
             
-            return (emotion, confidence, "single")
+            return (emotion, confidence, "single", [])
         
         # For multiple clauses - calculate weighted emotions
         emotion_scores = {}
@@ -323,21 +352,52 @@ class ClauseAnalyzer:
             for emotion, scores in emotion_scores.items()
         }
         
-        # Determine emotion type
-        unique_emotions = list(emotion_avg.keys())
-        max_confidence = max(emotion_avg.values())
+        # Check for opposing emotions
+        opposing_pairs = [
+            ('joy', 'sadness'),
+            ('joy', 'disappointment'),
+            ('love', 'anger'),
+            ('excitement', 'disappointment'),
+            ('optimism', 'fear'),
+            ('admiration', 'disgust')
+        ]
         
-        # Ambiguous if all emotions have low confidence
-        if max_confidence < 0.6:
+        unique_emotions = list(emotion_avg.keys())
+        has_opposing = False
+        for e1, e2 in opposing_pairs:
+            if e1 in unique_emotions and e2 in unique_emotions:
+                has_opposing = True
+                break
+        
+        # Check if any emotion was implicit (from rule)
+        has_implicit = any(c.get('is_implicit', False) for c in clause_emotions)
+        
+        # Sort emotions by confidence
+        sorted_emotions = sorted(emotion_avg.items(), key=lambda x: x[1], reverse=True)
+        max_confidence = sorted_emotions[0][1]
+        
+        # Determine emotion type and primary emotion
+        if has_opposing:
+            emotion_type = 'opposing'
+            # For opposing emotions, use "conflicted" as summary with averaged confidence
+            avg_confidence = sum(emotion_avg.values()) / len(emotion_avg)
+            primary_emotion = 'conflicted'
+            primary_emotions = [e[0] for e in sorted_emotions[:2]]  # Top 2 opposing emotions
+        elif max_confidence < 0.6:
             emotion_type = 'ambiguous'
-        # Single if one emotion dominates
+            # Weak/unclear emotions - keep "ambiguous"
+            primary_emotion = 'ambiguous'
+            primary_emotions = [e[0] for e in sorted_emotions[:2]]  # Top 2 emotions
+            avg_confidence = max_confidence
         elif len(unique_emotions) == 1 or max_confidence >= 0.7:
             emotion_type = 'single'
-        # Mixed otherwise
+            primary_emotion = sorted_emotions[0][0]
+            primary_emotions = []
+            avg_confidence = max_confidence
         else:
             emotion_type = 'mixed'
+            primary_emotion = sorted_emotions[0][0]
+            primary_emotions = [e[0] for e in sorted_emotions[1:3]]  # Next 2 emotions
+            avg_confidence = max_confidence
         
-        # Get emotion with highest average confidence
-        primary = max(emotion_avg.items(), key=lambda x: x[1])
-        
-        return (primary[0], primary[1], emotion_type)
+        return (primary_emotion, avg_confidence, emotion_type, primary_emotions)

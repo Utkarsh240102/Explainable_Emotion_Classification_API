@@ -218,6 +218,12 @@ async def predict_emotion(input_data: TextInput):
             clauses = clause_analyzer.split_into_clauses(text)
             logger.debug(f"Split into {len(clauses)} clauses: {clauses}")
             
+            # If no valid clauses after cleaning, fall back to simple analysis
+            if not clauses or len(clauses) == 0:
+                logger.info("No valid clauses found, falling back to simple analysis")
+                needs_clause_analysis = False
+        
+        if needs_clause_analysis and clauses:
             # Analyze each clause
             clause_emotions = []
             for clause_text in clauses:
@@ -227,26 +233,63 @@ async def predict_emotion(input_data: TextInput):
                 # Predict emotion for clause
                 prediction = model.predict(tokenized['input_ids'], tokenized['attention_mask'])
                 
+                # Apply Implicit Negation Rule
+                emotion = prediction['emotion']
+                confidence = prediction['confidence']
+                all_probs = prediction['all_probabilities'].copy()  # Copy to modify
+                is_implicit = False
+                
+                if emotion == 'neutral':
+                    clause_lower = clause_text.lower()
+                    
+                    # Check for negation words
+                    negation_words = ['not', "isn't", "isnt", "aren't", "arent", "doesn't", "doesnt", 
+                                     "don't", "dont", "never", "won't", "wont", "cannot", "can't", "cant"]
+                    has_negation = any(neg in clause_lower for neg in negation_words)
+                    
+                    # Check for self-reference
+                    self_ref = ['i ', 'me ', 'my ', 'myself', "i'm", "i've"]
+                    has_self_ref = any(ref in clause_lower for ref in self_ref)
+                    
+                    # Check for explicit emotion words
+                    emotion_words = ['happy', 'sad', 'angry', 'fear', 'scared', 'worried', 'joyful', 
+                                   'disappointed', 'nervous', 'optimistic', 'proud', 'grateful', 
+                                   'content', 'excited', 'anxious', 'upset', 'depressed', 'mad']
+                    has_emotion_word = any(word in clause_lower for word in emotion_words)
+                    
+                    # Apply rule: negation + self-reference + no explicit emotion
+                    if has_negation and has_self_ref and not has_emotion_word:
+                        emotion = 'disappointment'
+                        confidence = 0.58  # Moderate confidence
+                        is_implicit = True
+                        # Update all_probabilities to reflect the implicit emotion
+                        neutral_prob = all_probs.get('neutral', 0.0)
+                        all_probs['disappointment'] = neutral_prob  # Transfer neutral's probability
+                        all_probs['neutral'] = 0.02  # Set neutral to very low
+                        logger.info(f"Applied Implicit Negation Rule to: '{clause_text[:40]}...'")
+                
                 clause_emotions.append({
                     'text': clause_text,
-                    'emotion': prediction['emotion'],
-                    'confidence': prediction['confidence'],
-                    'all_probabilities': prediction['all_probabilities']
+                    'emotion': emotion,
+                    'confidence': confidence,
+                    'all_probabilities': all_probs,
+                    'is_implicit': is_implicit
                 })
                 
-                logger.debug(f"Clause: '{clause_text[:30]}...' → {prediction['emotion']} ({prediction['confidence']:.2f})")
+                implicit_marker = " [implicit]" if is_implicit else ""
+                logger.debug(f"Clause: '{clause_text[:30]}...' → {emotion} ({confidence:.2f}){implicit_marker}")
             
             # Detect emotion shifts
             shift_analysis = clause_analyzer.detect_emotion_shift(clause_emotions)
             
-            # Get primary emotion with emotion_type
-            primary_emotion, avg_confidence, emotion_type = clause_analyzer.get_primary_emotion(clause_emotions)
+            # Get primary emotion with emotion_type and primary emotions list
+            primary_emotion, avg_confidence, emotion_type, primary_emotions = clause_analyzer.get_primary_emotion(clause_emotions)
             
             # Get all probabilities (averaged across clauses)
             all_emotions_avg = {}
             for emotion_label in model.get_emotion_labels():
                 probs = [c['all_probabilities'].get(emotion_label, 0) for c in clause_emotions]
-                all_emotions_avg[emotion_label] = sum(probs) / len(probs)
+                all_emotions_avg[emotion_label] = sum(probs) / len(probs) if len(probs) > 0 else 0.0
             
             # Generate explanation for mixed emotions
             explanation = explainer.generate_clause_level_explanation(
@@ -257,7 +300,7 @@ async def predict_emotion(input_data: TextInput):
                 emotion_type=emotion_type
             )
             
-            # Step 6: Apply reasoning fixes
+            # Step 6: Apply reasoning fixes (but preserve opposing emotion detection)
             logger.debug("Applying reasoning fixes...")
             raw_output = {
                 'emotion': primary_emotion,
@@ -265,6 +308,7 @@ async def predict_emotion(input_data: TextInput):
                 'all_emotions': all_emotions_avg,
                 'explanation': explanation,
                 'emotion_type': emotion_type,
+                'primary_emotions': primary_emotions,
                 'clauses': [{
                     'text': c['text'],
                     'emotion': c['emotion'],
@@ -272,16 +316,27 @@ async def predict_emotion(input_data: TextInput):
                 } for c in clause_emotions]
             }
             
-            fixed_output = reasoning_assistant.apply_reasoning_fixes(text, raw_output)
+            # Only apply reasoning fixes if NOT opposing emotions (preserve our logic)
+            if emotion_type == 'opposing':
+                # Skip reasoning assistant for opposing emotions - our logic is correct
+                fixed_output = raw_output
+                fixed_output['primary_emotion'] = primary_emotion
+                logger.info(f"Skipping reasoning fixes for opposing emotions: {primary_emotions}")
+            else:
+                fixed_output = reasoning_assistant.apply_reasoning_fixes(text, raw_output)
+                # Preserve primary_emotions from our analysis if available
+                if primary_emotions and not fixed_output.get('primary_emotions'):
+                    fixed_output['primary_emotions'] = primary_emotions
             
-            # Create clause emotion objects from fixed output
+            # Create clause emotion objects from fixed output (include all_probabilities)
             clause_objects = [
                 ClauseEmotion(
                     text=c['text'],
                     emotion=c['emotion'],
-                    confidence=c['confidence']
+                    confidence=c['confidence'],
+                    all_probabilities=clause_emotions[i].get('all_probabilities', {})
                 )
-                for c in fixed_output['clauses']
+                for i, c in enumerate(fixed_output['clauses'])
             ]
             
             # Create response with fixed reasoning
@@ -291,6 +346,7 @@ async def predict_emotion(input_data: TextInput):
                 all_emotions=all_emotions_avg,
                 explanation=fixed_output['explanation'],
                 emotion_type=fixed_output['emotion_type'],
+                primary_emotions=fixed_output.get('primary_emotions'),
                 clauses=clause_objects
             )
             
