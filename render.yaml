@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: emotion-api-backend
+    runtime: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn backend.main:app --host 0.0.0.0 --port $PORT"
+    plan: standard
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13"
+    regions:
+      - name: oregon
+  
+  - type: static_site
+    name: emotion-api-frontend
+    staticPublishPath: ./frontend/dist
+    buildCommand: "cd frontend && npm install && npm run build"
+    envVars:
+      - key: VITE_API_URL
+        value: "https://emotion-api-backend.onrender.com"
+    regions:
+      - name: oregon
