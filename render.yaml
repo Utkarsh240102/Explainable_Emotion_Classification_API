@@ -8,15 +8,3 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.13"
-    regions:
-      - name: oregon
-  
-  - type: static_site
-    name: emotion-api-frontend
-    staticPublishPath: ./frontend/dist
-    buildCommand: "cd frontend && npm install && npm run build"
-    envVars:
-      - key: VITE_API_URL
-        value: "https://emotion-api-backend.onrender.com"
-    regions:
-      - name: oregon
